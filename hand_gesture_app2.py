@@ -1,24 +1,34 @@
 import cv2
 import numpy as np
-import math
+from sklearn.metrics import pairwise
+import keras
+import time
+from keras.preprocessing import image
 
 # Paramters
 PROGRAM_TITLE = 'Hand Gesture Recognition'
+WINDOW_WIDTH = 1400
+WINDOW_HEIGHT = 500
+CAMERA_PORT = 0  # 0 bei Mac OS X, 1 bei Windows
 REGION_X = 0.5
 REGION_Y = 0.7
 LEARNING_RATE = 0
-blur_value = 3
-parse_threshold = 25
+blur_value = 5
+parse_threshold = 2
+gesture = ["palm", "peace", "thumb", "fist", "ok", "L"]
+model = keras.models.load_model('handrecognition_model_backSub.h5')
+
+# FLAGS
+FIRST_ITERATION = True
 
 # Text Paramters
 font = cv2.FONT_HERSHEY_SIMPLEX
-fontScale = 1
-fontColor = (0, 0, 0)
-lineType = 2
-
+fontScale = 2
+fontColor = (0, 0, 255)
+lineType = 3
 
 # Camera
-camera = cv2.VideoCapture(0)
+camera = cv2.VideoCapture(CAMERA_PORT)
 
 # Window
 cv2.namedWindow(PROGRAM_TITLE, cv2.WINDOW_NORMAL)
@@ -26,6 +36,7 @@ cv2.resizeWindow(PROGRAM_TITLE, 600, 600)
 
 # Globals
 bg_model = None
+parsed_img = None
 
 
 def quit_program():
@@ -43,6 +54,14 @@ def capture_background():
     global bg_model
     bg_model = cv2.createBackgroundSubtractorMOG2(0, 50)
 
+def create_snapshot():
+    """
+    Diese Methode erstellt ein Bild vom derzeitigen analysieten Bild.
+    """
+    global parsed_img
+    if parsed_img is not None:
+        cv2.imwrite("frame-" + time.strftime("%d-%m-%Y-%H-%M-%S") + ".jpg", cv2.cvtColor(parsed_img, cv2.COLOR_RGB2BGR))
+
 
 def parse_key_command():
     """
@@ -51,7 +70,8 @@ def parse_key_command():
     key = cv2.waitKey(1)
     action = {
         ord('q'): quit_program,
-        ord('b'): capture_background
+        ord('b'): capture_background,
+        ord('s'): create_snapshot
     }
     func = action.get(key, None)
     if func is not None:
@@ -83,14 +103,20 @@ def remove_background(frame):
 
 def parse_img(img):
     global blur_value, parse_threshold
+    # Bilateral Filter
+    filter = cv2.bilateralFilter(img, 5, 50, 100)
     # Grayscale
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(filter, cv2.COLOR_BGR2GRAY)
     # Make the grey scale image have three channels
-    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    gray = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     # Blur
-    img = cv2.GaussianBlur(img, (blur_value, blur_value), 0)
-    img = cv2.threshold(img, parse_threshold, 255, cv2.THRESH_BINARY)[1]
-    return img
+    blur = cv2.GaussianBlur(gray, (blur_value, blur_value), 0)
+    # Threshold
+    thresh = cv2.threshold(blur, parse_threshold, 255, cv2.THRESH_BINARY)[1]
+    # Erosion
+    kernel = np.ones((5, 5), np.uint8)
+    erosion = cv2.erode(thresh, kernel, iterations=1)
+    return erosion
 
 
 def draw_convex_hull(img):
@@ -115,27 +141,40 @@ def draw_convex_hull(img):
     return img, res
 
 
-def calculateFingers(res, drawing):  # -> finished bool, cnt: finger count
-    #  convexity defect
-    hull = cv2.convexHull(res, returnPoints=False)
-    if len(hull) > 3:
-        defects = cv2.convexityDefects(res, hull)
-        if defects is not None:
-            cnt = 0
-            for i in range(defects.shape[0]):  # calculate the angle
-                s, e, f, d = defects[i][0]
-                start = tuple(res[s][0])
-                end = tuple(res[e][0])
-                far = tuple(res[f][0])
-                a = math.sqrt((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2)
-                b = math.sqrt((far[0] - start[0]) ** 2 + (far[1] - start[1]) ** 2)
-                c = math.sqrt((end[0] - far[0]) ** 2 + (end[1] - far[1]) ** 2)
-                angle = math.acos((b ** 2 + c ** 2 - a ** 2) / (2 * b * c))  # cosine theorem
-                if angle <= math.pi / 2:  # angle less than 90 degree, treat as fingers
-                    cnt += 1
-                    cv2.circle(drawing, far, 8, [211, 84, 0], -1)
-            return True, cnt
-    return False, 0
+def count_fingers(img):
+    thresh = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    cnts, _ = cv2.findContours(thresh.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if len(cnts) == 0:
+        return 0
+
+    segmented = max(cnts, key=cv2.contourArea)
+    hull = cv2.convexHull(segmented)
+
+    extreme_top = tuple(hull[hull[:, :, 1].argmin()][0])
+    extreme_bottom = tuple(hull[hull[:, :, 1].argmax()][0])
+    extreme_left = tuple(hull[hull[:, :, 0].argmin()][0])
+    extreme_right = tuple(hull[hull[:, :, 0].argmax()][0])
+
+    # Zentrum
+    cX = int((extreme_left[0] + extreme_right[0]) / 2)
+    cY = int((extreme_top[1] + extreme_bottom[1]) / 2)
+
+    distance = pairwise.euclidean_distances([(cX, cY)], Y=[extreme_left, extreme_right, extreme_top, extreme_bottom])[0]
+    maximum_distance = distance[distance.argmax()]
+
+    radius = int(0.8 * maximum_distance)
+    circumference = (2 * np.pi * radius)
+    circular_roi = np.zeros(thresh.shape[:2], dtype="uint8")
+    cv2.circle(circular_roi, (cX, cY), radius, 255, 1)
+    circular_roi = cv2.bitwise_and(thresh, thresh, mask=circular_roi)
+    cnts, _ = cv2.findContours(circular_roi.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    count = 0
+    for c in cnts:
+        (x, y, w, h) = cv2.boundingRect(c)
+        if ((cY + (cY * 0.25)) > (y + h)) and ((circumference * 0.25) > c.shape[0]):
+            count += 1
+
+    return count
 
 
 # Main loop
@@ -148,11 +187,14 @@ while camera.isOpened():
 
     # Füge Text zum Original-Bild hinzu
     original_image = frame.copy()
-    cv2.putText(original_image, "Original", (10, 30), font, fontScale, fontColor, lineType)
+    cv2.putText(original_image, "Original", (10, 50), font, fontScale, fontColor, lineType, cv2.LINE_AA)
 
     # Berechne ROI
     roi = crop_img(frame)
     roi_height, roi_width, _ = roi.shape
+
+    # Prediction
+    prediction_img = roi.copy()
 
     # Resize das Original-Bild, um es neben den anderen Bildern darstellen zu können
     original_image = cv2.resize(original_image, (roi_width, roi_height))
@@ -160,18 +202,32 @@ while camera.isOpened():
     if bg_model is not None:
         roi = remove_background(roi)
         parsed_img = parse_img(roi)
-        roi = parsed_img.copy()
 
         # 'Manuelle' Methode: Konvex-Hülle
-        roi, res = draw_convex_hull(roi)
-        #count = calculateFingers(res, roi)
-        #print(count)
+        finger_count = count_fingers(parsed_img.copy())
+        roi, _ = draw_convex_hull(parsed_img.copy())
+        if finger_count is not None:
+            cv2.putText(roi, "Finger: "+str(finger_count), (10, 50), font, fontScale, fontColor, lineType, cv2.LINE_AA)
 
-
-
+        # Methode mit Machine Learning
+        prediction_img = cv2.cvtColor(prediction_img, cv2.COLOR_BGR2GRAY)
+        prediction_img = cv2.flip(prediction_img, 1)
+        data = cv2.resize(prediction_img, (100, 100))
+        prediction_img = image.img_to_array(data)
+        prediction_img = np.expand_dims(prediction_img, axis=0)
+        prediction = model.predict(prediction_img)
+        gesture_string = gesture[np.argmax(prediction[0])]
+        prediction_img = parsed_img.copy()
+        cv2.putText(prediction_img, gesture_string, (10, 50), font, fontScale, fontColor, lineType, cv2.LINE_AA)
 
     # Zeige Alle Bilder
-    cv2.imshow(PROGRAM_TITLE, np.hstack((original_image, roi)))
+    cv2.imshow(PROGRAM_TITLE, np.hstack((original_image, roi, prediction_img)))
 
     # Überprüfe, ob eine Taste gedrückt wurde
     parse_key_command()
+
+    if FIRST_ITERATION:
+        FIRST_ITERATION = False
+    else:
+        # Vergrößere das Fenster
+        cv2.resizeWindow(PROGRAM_TITLE, WINDOW_WIDTH, WINDOW_HEIGHT)
