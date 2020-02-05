@@ -8,7 +8,7 @@ from pynput.keyboard import Key, Controller
 gesture = ["palm", "peace", "thumb", "fist", "ok", "L"]
 
 # load the model
-model = keras.models.load_model('handrecognition_model_backSub2.h5')
+model = keras.models.load_model('models/handrecognition_model_backSub2.h5')
 
 cam = cv2.VideoCapture(1)
 keyboard = Controller()

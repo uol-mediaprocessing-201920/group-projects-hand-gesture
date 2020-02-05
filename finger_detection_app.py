@@ -194,7 +194,7 @@ def count_fingers(img):
         if ((c_y + (c_y * 0.28)) > (y + h)) and ((circumference * 0.28) > c.shape[0]):
             count += 1
 
-    return count
+    return max(min(count, 5), 0)
 
 
 # Main loop
